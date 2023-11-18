@@ -1,0 +1,337 @@
+---
+title: "Time Series Analysis project - forecast three-month and ten-year treasury
+  maturity rates with VAR"
+author: "Lin Xinyang.Monica"
+date: "2023-08-13"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup,message=FALSE,warning=FALSE,eval=TRUE}
+r = getOption("repos")
+options(repos = c(CRAN = "https://cloud.r-project.org"))
+```
+
+## Packages
+
+Let's load packages we will need to use for analysis
+
+```{r,message=FALSE,warning=FALSE,eval=TRUE}
+install.packages("xts")
+install.packages("lmtest")
+install.packages("ggplot2")
+install.packages("zoo")
+install.packages("tidyverse")
+install.packages("dplyr")
+install.packages("vars")
+install.packages("knitr")
+install.packages("kableExtra")
+library(xts)
+library(lmtest)
+library(ggplot2)
+library(zoo)
+library(tidyverse)
+library(dplyr)
+library(vars)
+library(knitr)
+library(kableExtra)
+
+source(file="D://Desktop//testdf.R")
+```
+
+## Import and process data
+
+We will import data used for analysis and coerce it into "xts" dataset indexed by date
+
+```{r}
+r3m_r10y<-read.csv(file="D://Desktop//mrates.csv")
+head(r3m_r10y,10)
+tail(r3m_r10y,10)
+class(r3m_r10y)
+r3m_r10y$date<-as.Date(x=r3m_r10y$date,format="%Y-%m-%d")
+r3m_r10y<-xts(x=r3m_r10y[,-1],order.by =r3m_r10y$date)
+```
+
+Data visualization
+
+```{r}
+plot(r3m_r10y[,1:2],
+  type="l",
+  col=c("red","blue"),
+  major.ticks="years",
+  grid.ticks.on="years",
+  grid.ticks.lty=3,
+  main="Three-month and ten-year treasury constant maturity rates"
+)
+```
+
+They seem non-stationary and have a certain long-run relationship. But we need to perform formal tests to confirm this.
+
+## Cointegration
+
+Let's check whether r3m and r10y are integrated of the same order
+
+```{r}
+testdf(variable=r3m_r10y$r3m,max.augmentations = 3)
+testdf(variable=r3m_r10y$r10y,max.augmentations = 3)
+```
+
+P-value of both data sets are much larger than 0.05, so we cannot reject the null hypothesis of DF test assuming non-stationarity.
+
+Now let's difference r3m and r10y
+
+```{r}
+testdf(variable = diff(r3m_r10y$r3m),max.augmentations = 3)
+testdf(variable = diff(r3m_r10y$r10y),max.augmentations = 3)
+```
+
+After the first differencing, both become stationary because p-value is much smaller than 0.05. Therefore they are both integrated of the order 1.
+
+Let's run a linear regression.
+
+```{r}
+r3m_r10y_line<- lm(r3m_r10y$r10y~r3m_r10y$r3m,data=r3m_r10y)
+summary(r3m_r10y_line)
+```
+
+r10m=0.78090\*r3m+2.39147+e_t
+
+Don't forget to check whether there is autocorrelation in its residuals!
+
+```{r}
+testdf(variable = residuals(r3m_r10y_line),max.augmentations = 3)
+```
+
+High p-value suggests no autocorrelation. Therefore they are cointegrated
+
+We could also perform granger casuality test:
+
+```{r}
+granger1<-grangertest(r10y~r3m,data=r3m_r10y,order=3)
+granger1
+
+granger2<-grangertest(r10y~r3m,data=r3m_r10y,order=5)
+granger2
+
+granger3<-grangertest(r3m~r10y,data=r3m_r10y,order=3)
+granger3
+
+granger4<-grangertest(r3m~r10y,data=r3m_r10y,order=5)
+granger4
+```
+We could confirm that r10y granger causes r3m.
+
+## ECM(Error Correction Mechanism)
+```{r}
+r3m_r10y$residual=lag.xts(x=resid(r3m_r10y_line),k=1)
+r3m_d<-diff(x=r3m_r10y$r3m)
+r10y_d<-diff(x=r3m_r10y$r10y)
+r3m_r10y_ecm=lm(r10y_d~r3m_d+r3m_r10y$residual,data=r3m_r10y)
+summary(r3m_r10y_ecm)
+```
+Intercept is insignificant, so let's remove it.
+```{r}
+r3m_r10y_ecm=lm(r10y_d~r3m_d+r3m_r10y$residual-1,data=r3m_r10y)
+summary(r3m_r10y_ecm)
+```
+r10y_d=0.42128 * r3m_d -0.02669 * (r10m-0.78090*r3m-2.39147)+e_t.
+```{r}
+1/0.02669
+```
+It takes around 37.46 periods to clear errors
+
+## Select VAR models
+```{r}
+r3m_r10y<-r3m_r10y[,-3]
+VARselect(r3m_r10y,lag.max =8,season = 12)
+```
+Information criteria suggests VAR(7) and VAR(3).
+
+ We could also visualize the result above:
+```{r}
+VARselect(r3m_r10y,lag.max =8,season = 12)%>%
+  .$criteria %>%
+  t() %>%
+  as_tibble() %>%
+  mutate(number_of_lags=1:nrow(.)) %>%
+  kbl(digits=3) %>%
+  kable_classic("striped",full_width=F)
+```
+
+Let's start with VAR(3):
+```{r}
+r3m_r10y.var3<-VAR(r3m_r10y,
+                   p=3,
+                   season=12)
+summary(r3m_r10y.var3)
+```
+
+Most seasonal dummies are insignificant, so let's remove them.
+```{r}
+r3m_r10y.var3<-VAR(r3m_r10y,
+                   p=3,
+                   )
+summary(r3m_r10y.var3)
+```
+
+Let's diagnose its residual
+```{r}
+plot(r3m_r10y.var3)
+```
+```{r}
+serial.test(r3m_r10y.var3)
+serial.test(r3m_r10y.var3,type=c("BG"))
+```
+Null hypothesis of no autocorrelation should be rejected based on very small p-value. So there is autocorrelation in the residual.
+
+VAR(7):
+```{r}
+r3m_r10y.var7<-VAR(r3m_r10y,
+                   p=7,
+                   season = 12)
+summary(r3m_r10y.var7)
+```
+Seasonal dummies are insignificant, so let's remove them.
+```{r}
+r3m_r10y.var7<-VAR(r3m_r10y,
+                   p=7)
+summary(r3m_r10y.var7)
+```
+
+Let's diagnoze its residual
+```{r}
+plot(r3m_r10y.var7)
+```
+```{r}
+serial.test(r3m_r10y.var7)
+serial.test(r3m_r10y.var7,type=c("BG")) 
+```
+Although there is autocorelation in its residual according to Portmanteau test, it passes BG test. So let's keep VAR(7).
+
+VAR(6):
+```{r}
+r3m_r10y.var6<-VAR(r3m_r10y,p=6)
+summary(r3m_r10y.var6)
+```
+```{r}
+serial.test(r3m_r10y.var6)
+serial.test(r3m_r10y.var6,type=c("BG"))
+```
+There is autocorrelation in it, so VAR(6) should not be considered.
+
+VAR(9):
+```{r}
+r3m_r10y.var9<-VAR(r3m_r10y,p=9)
+summary(r3m_r10y.var9)
+```
+
+```{r}
+serial.test(r3m_r10y.var9)
+serial.test(r3m_r10y.var9,type=c("BG"))
+```
+VAR(9) could also work since we cannot reject the null hypothesis assuming no autocorelation in Portmanteau test and BG test.
+
+Let's use information criteria to see which one is better
+```{r}
+AIC(r3m_r10y.var9,r3m_r10y.var7)
+BIC(r3m_r10y.var9,r3m_r10y.var7)
+```
+
+Let's use VAR(7)
+
+## Impulse Response Functions
+```{r}
+plot(irf(r3m_r10y.var7,n.ahead = 40))
+plot(fevd(r3m_r10y.var7,n.ahead = 40))
+```
+
+## Forecast 12-month periods ahead with VAR(7)
+Let's cut the data in the last 12-month periods
+```{r}
+tail(r3m_r10y,13)
+r3m_r10y.short<-r3m_r10y["/2019-03-01"]
+tail(r3m_r10y.short,12)
+```
+Let's use VAR(7) to fit the shorten data set
+```{r}
+r3m_r10y.short.var7<-VAR(r3m_r10y.short,
+                         p=7)
+```
+
+Let's perform forecasting
+```{r}
+r3m_r10y.forecast<-predict(r3m_r10y.short.var7,
+                           n.ahead = 12,
+                           ci=0.95)
+
+r3m_r10y.forecast
+```
+Forecast data is stored in the column called "fcst"
+
+forecast of three-month and ten-year treasury maturity rates
+```{r}
+r3m_r10y.forecast$fcst$r3m
+r3m_r10y.forecast$fcst$r10y
+```
+Let's corcer them to "xts" and change the names of each column
+```{r}
+r3m_forecast<- xts(r3m_r10y.forecast$fcst$r3m[,-4],
+                   tail(index(r3m_r10y),12))
+names(r3m_forecast)<-c("r3m_forecast","r3m_lower","r3m_upper")
+
+
+r10y_forecast<-xts(r3m_r10y.forecast$fcst$r10y[,-4],
+                   tail(index(r3m_r10y),12) )
+names(r10y_forecast)<-c("r10y_forecast","r10y_lower","r10y_upper")
+```
+
+Let's merge them with the original dataset.
+```{r}
+r3m_r10y_merged<-merge(r3m_r10y,
+  r3m_forecast,
+  r10y_forecast
+)
+
+r3m_r10y_merged
+```
+
+ Let's plot for r3m and r10y.
+```{r}
+plot(r3m_r10y_merged["2018/",c("r3m","r3m_forecast","r3m_lower","r3m_upper")],
+     col=c("black","red","blue","blue"),
+     major.ticks="years",
+   grid.ticks.on="years",
+   grid.ticks.lty=3,
+   main="Real values of three-month maturity rates vs forecast"
+)
+
+plot(r3m_r10y_merged["2018/",c("r10y","r10y_forecast","r10y_lower","r10y_upper")],
+     col=c("black","red","blue","blue"),
+     major.ticks="years",
+     grid.ticks.on="years",
+     grid.ticks.lty=3,
+     main="Real values of ten-year maturity rates vs forecast"
+)
+```
+
+## Forecast Accuracy Measures
+```{r}
+r3m_r10y_merged$mae.r3m   <-  abs(r3m_r10y_merged$r3m - r3m_r10y_merged$r3m_forecast)
+r3m_r10y_merged$mse.r3m   <-  (r3m_r10y_merged$r3m - r3m_r10y_merged$r3m_forecast) ^2
+r3m_r10y_merged$mape.r3m  <-  abs((r3m_r10y_merged$r3m - r3m_r10y_merged$r3m_forecast)/r3m_r10y_merged$r3m)
+r3m_r10y_merged$amape.r3m <-  abs((r3m_r10y_merged$r3m - r3m_r10y_merged$r3m_forecast) / 
+                            (r3m_r10y_merged$r3m + r3m_r10y_merged$r3m_forecast))
+
+
+r3m_r10y_merged$mae.r10y   <-  abs(r3m_r10y_merged$r10y - r3m_r10y_merged$r10y_forecast)
+r3m_r10y_merged$mse.r10y  <-  (r3m_r10y_merged$r10y - r3m_r10y_merged$r10y_forecast) ^2
+r3m_r10y_merged$mape.r10y  <-  abs((r3m_r10y_merged$r10y - r3m_r10y_merged$r10y_forecast)/r3m_r10y_merged$r10y)
+r3m_r10y_merged$amape.r10y <-  abs((r3m_r10y_merged$r10y - r3m_r10y_merged$r10y_forecast) / 
+                                    (r3m_r10y_merged$r10y + r3m_r10y_merged$r10y_forecast))
+
+tail(r3m_r10y_merged,12)
+dim(r3m_r10y_merged)
+error<-colMeans(r3m_r10y_merged[,9:16],na.rm = TRUE)
+error
+```
